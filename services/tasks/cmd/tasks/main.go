@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net/http"
+	"net/http" // стандартный пакет
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/student/tech-ip-sem2/services/tasks/client/authclient"
-	authhttp "github.com/student/tech-ip-sem2/services/tasks/internal/http"
+	"github.com/student/tech-ip-sem2/services/tasks/internal/grpcclient"
+	taskshttp "github.com/student/tech-ip-sem2/services/tasks/internal/http" // алиас для внутреннего пакета
 	"github.com/student/tech-ip-sem2/services/tasks/internal/service"
 )
 
@@ -21,14 +21,23 @@ func main() {
 	if tasksPort == "" {
 		tasksPort = "8082"
 	}
-	authBaseURL := os.Getenv("AUTH_BASE_URL")
-	if authBaseURL == "" {
-		authBaseURL = "http://localhost:8081"
+	authGrpcAddr := os.Getenv("AUTH_GRPC_ADDR")
+	if authGrpcAddr == "" {
+		authGrpcAddr = "localhost:50051"
 	}
 
 	taskService := service.NewTaskService()
-	authClient := authclient.NewAuthClient(authBaseURL)
-	router := authhttp.NewRouter(taskService, authClient, logger)
+
+	// Создаём gRPC клиент
+	authClient, err := grpcclient.NewAuthClient(authGrpcAddr)
+	if err != nil {
+		logger.Error("failed to create auth gRPC client", "error", err)
+		os.Exit(1)
+	}
+	defer authClient.Close()
+
+	// Используем алиас taskshttp
+	router := taskshttp.NewRouter(taskService, authClient, logger)
 
 	server := &http.Server{
 		Addr:         ":" + tasksPort,
@@ -42,7 +51,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		logger.Info("Tasks service started", "port", tasksPort, "auth_base_url", authBaseURL)
+		logger.Info("Tasks service started", "port", tasksPort, "auth_grpc_addr", authGrpcAddr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server error", "error", err)
 		}

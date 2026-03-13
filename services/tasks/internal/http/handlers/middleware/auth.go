@@ -1,15 +1,19 @@
 package middleware
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/student/tech-ip-sem2/services/tasks/client/authclient"
+	"google.golang.org/grpc/metadata"
+
+	"github.com/student/tech-ip-sem2/services/tasks/internal/grpcclient"
 	"github.com/student/tech-ip-sem2/shared/middleware"
 )
 
-// AuthMiddleware проверяет токен через Auth service.
-func AuthMiddleware(authClient *authclient.AuthClient) func(http.Handler) http.Handler {
+func AuthMiddleware(authClient *grpcclient.AuthClient) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -24,18 +28,30 @@ func AuthMiddleware(authClient *authclient.AuthClient) func(http.Handler) http.H
 			}
 			token := parts[1]
 
+			// Получаем request-id из контекста (установлен ранее middleware.RequestIDMiddleware)
 			requestID := middleware.GetRequestID(r.Context())
-			valid, err := authClient.Verify(r.Context(), token, requestID)
+
+			// Создаём контекст с дедлайном 2 секунды
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+
+			// Прокидываем request-id в gRPC metadata
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-request-id", requestID)
+
+			valid, _, err := authClient.Verify(ctx, token)
 			if err != nil {
-				// Auth недоступен или другая ошибка – возвращаем 500 (fail closed)
-				http.Error(w, `{"error":"authorization service unavailable"}`, http.StatusInternalServerError)
+				if errors.Is(err, context.DeadlineExceeded) {
+					http.Error(w, `{"error":"auth service timeout"}`, http.StatusGatewayTimeout) // 504
+					return
+				}
+				// Недоступность или другая ошибка
+				http.Error(w, `{"error":"authorization service unavailable"}`, http.StatusServiceUnavailable) // 503
 				return
 			}
 			if !valid {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			// токен валиден – продолжаем
 			next.ServeHTTP(w, r)
 		})
 	}
